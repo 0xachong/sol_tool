@@ -3,9 +3,11 @@ import { WalletInfo } from './types';
 import { WalletConnection } from './components/WalletConnection';
 import { RentRecovery } from './components/RentRecovery';
 import { AccountCloser } from './components/AccountCloser';
+import { BatchWalletManager } from './components/BatchWalletManager';
 
 function App() {
     const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
+    const [currentPage, setCurrentPage] = useState<'tools' | 'batch'>('tools');
 
     const handleWalletConnect = (info: WalletInfo) => {
         setWalletInfo(info);
@@ -22,31 +24,65 @@ function App() {
                 <p>租金回收与账户管理工具</p>
             </div>
 
-            <div className="card">
-                <h2>🔧 Solana工具集</h2>
-
-                {/* 钱包连接部分 */}
-                <div style={{ marginBottom: '30px', padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                    <h3>1. 钱包连接</h3>
-                    <WalletConnection
-                        onWalletConnect={handleWalletConnect}
-                        onWalletDisconnect={handleWalletDisconnect}
-                        walletInfo={walletInfo}
-                    />
-                </div>
-
-                {/* 租金回收分析部分 */}
-                <div style={{ marginBottom: '30px', padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                    <h3>2. 租金回收分析</h3>
-                    <RentRecovery walletInfo={walletInfo} />
-                </div>
-
-                {/* 关闭账户部分 */}
-                <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                    <h3>3. 关闭账户</h3>
-                    <AccountCloser walletInfo={walletInfo} />
+            {/* 页面导航 */}
+            <div className="card" style={{ marginBottom: '20px' }}>
+                <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+                    <button
+                        className={`btn ${currentPage === 'tools' ? 'btn-primary' : ''}`}
+                        onClick={() => setCurrentPage('tools')}
+                        style={{
+                            backgroundColor: currentPage === 'tools' ? '#007bff' : '#6c757d',
+                            color: 'white'
+                        }}
+                    >
+                        🔧 基础工具
+                    </button>
+                    <button
+                        className={`btn ${currentPage === 'batch' ? 'btn-primary' : ''}`}
+                        onClick={() => setCurrentPage('batch')}
+                        style={{
+                            backgroundColor: currentPage === 'batch' ? '#007bff' : '#6c757d',
+                            color: 'white'
+                        }}
+                    >
+                        🔑 批量钱包管理
+                    </button>
                 </div>
             </div>
+
+            {currentPage === 'tools' && (
+                <div className="card">
+                    <h2>🔧 Solana工具集</h2>
+
+                    {/* 钱包连接部分 */}
+                    <div style={{ marginBottom: '30px', padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
+                        <h3>1. 钱包连接</h3>
+                        <WalletConnection
+                            onWalletConnect={handleWalletConnect}
+                            onWalletDisconnect={handleWalletDisconnect}
+                            walletInfo={walletInfo}
+                        />
+                    </div>
+
+                    {/* 租金回收分析部分 */}
+                    <div style={{ marginBottom: '30px', padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
+                        <h3>2. 租金回收分析</h3>
+                        <RentRecovery walletInfo={walletInfo} />
+                    </div>
+
+                    {/* 关闭账户部分 */}
+                    <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
+                        <h3>3. 关闭账户</h3>
+                        <AccountCloser walletInfo={walletInfo} />
+                    </div>
+                </div>
+            )}
+
+            {currentPage === 'batch' && (
+                <div className="card">
+                    <BatchWalletManager walletInfo={walletInfo} />
+                </div>
+            )}
 
             <div className="card">
                 <h2>📖 使用说明</h2>
@@ -59,6 +95,9 @@ function App() {
 
                     <h3>3. 关闭账户</h3>
                     <p>输入要关闭的账户地址和目标地址，点击"关闭账户"按钮。系统将关闭账户并将余额转移到目标地址。</p>
+
+                    <h3>4. 批量钱包管理</h3>
+                    <p>批量管理多个私钥钱包，使用OKX连接的钱包作为代付地址回收所有资产。支持批量扫描钱包余额和零余额Token账户，一键回收所有SOL和租金。</p>
 
                     <h3>💡 关于租金豁免（Rent Exemption）</h3>
                     <div style={{ backgroundColor: '#f8f9fa', padding: '16px', borderRadius: '8px', margin: '12px 0' }}>

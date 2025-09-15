@@ -173,10 +173,15 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
         }
     };
 
-    // 批量关闭零余额Token账户
+    // 批量关闭零余额Token账户（单笔交易，主账户代付费用）
     const batchCloseZeroBalanceAccounts = async () => {
         if (zeroBalanceAccounts.length === 0) {
             setError('没有可关闭的Token账户');
+            return;
+        }
+
+        if (!walletInfo?.address) {
+            setError('请先连接钱包');
             return;
         }
 
@@ -185,61 +190,60 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
         setSuccess(null);
         setBatchResult({ success: 0, failed: 0, total: zeroBalanceAccounts.length });
 
-        let successCount = 0;
-        let failedCount = 0;
-
         try {
             const { PublicKey, Transaction, TransactionInstruction } = await import('@solana/web3.js');
             const { Buffer } = await import('buffer');
 
+            console.log(`开始批量关闭 ${zeroBalanceAccounts.length} 个Token账户...`);
+            console.log(`主账户 ${walletInfo.address} 将代付所有网络费用`);
+
+            // 创建单笔交易
+            const transaction = new Transaction();
+
+            // 为每个零余额Token账户添加关闭指令
             for (const account of zeroBalanceAccounts) {
-                try {
-                    console.log(`正在关闭Token账户: ${account.address}`);
+                console.log(`添加关闭指令: ${account.address}`);
 
-                    const transaction = new Transaction();
-
-                    // 添加关闭Token账户的指令
-                    transaction.add(
-                        new TransactionInstruction({
-                            keys: [
-                                { pubkey: new PublicKey(account.address), isSigner: false, isWritable: true },
-                                { pubkey: new PublicKey(destination), isSigner: false, isWritable: true },
-                                { pubkey: new PublicKey(walletInfo!.address), isSigner: false, isWritable: false },
-                            ],
-                            programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-                            data: Buffer.from([9, 0, 0, 0]), // CloseAccount instruction
-                        })
-                    );
-
-                    // 设置交易参数
-                    const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
-                    transaction.recentBlockhash = blockhash;
-                    transaction.feePayer = new PublicKey(walletInfo!.address);
-
-                    // 签名并发送交易
-                    const signedTransaction = await walletAdapter.signTransaction(transaction);
-                    const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
-                    await solanaUtils['connection'].confirmTransaction(signature, 'confirmed');
-
-                    successCount++;
-                    console.log(`成功关闭Token账户: ${account.address}, 签名: ${signature}`);
-
-                    // 更新进度
-                    setBatchResult({ success: successCount, failed: failedCount, total: zeroBalanceAccounts.length });
-
-                } catch (err) {
-                    failedCount++;
-                    console.error(`关闭Token账户失败 ${account.address}:`, err);
-                }
+                transaction.add(
+                    new TransactionInstruction({
+                        keys: [
+                            { pubkey: new PublicKey(account.address), isSigner: false, isWritable: true },
+                            { pubkey: new PublicKey(destination), isSigner: false, isWritable: true },
+                            { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: false },
+                        ],
+                        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                        data: Buffer.from([9, 0, 0, 0]), // CloseAccount instruction
+                    })
+                );
             }
 
+            console.log(`交易包含 ${zeroBalanceAccounts.length} 个关闭指令`);
+
+            // 设置交易参数
+            const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
+            transaction.recentBlockhash = blockhash;
+            transaction.feePayer = new PublicKey(walletInfo.address);
+
+            // 签名并发送交易
+            console.log('正在签名交易...');
+            const signedTransaction = await walletAdapter.signTransaction(transaction);
+
+            console.log('正在发送交易...');
+            const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
+
+            console.log('等待交易确认...');
+            await solanaUtils['connection'].confirmTransaction(signature, 'confirmed');
+
             const totalRent = zeroBalanceAccounts.reduce((sum, acc) => sum + acc.rentAmount, 0);
-            setSuccess(`批量关闭完成！成功: ${successCount}, 失败: ${failedCount}, 回收租金: ${solanaUtils.formatSOL(totalRent)} SOL`);
-            setBatchResult({ success: successCount, failed: failedCount, total: zeroBalanceAccounts.length });
+            setSuccess(`批量关闭成功！关闭了 ${zeroBalanceAccounts.length} 个Token账户，回收租金: ${solanaUtils.formatSOL(totalRent)} SOL`);
+            setBatchResult({ success: zeroBalanceAccounts.length, failed: 0, total: zeroBalanceAccounts.length });
+
+            console.log(`批量关闭完成！签名: ${signature}`);
 
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : '批量关闭失败';
             setError(`批量关闭失败: ${errorMessage}`);
+            console.error('批量关闭失败:', err);
         } finally {
             setIsProcessing(false);
         }
@@ -602,8 +606,26 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
             }}>
                 <h3 style={{ margin: '0 0 16px 0', color: '#0066cc' }}>🔄 批量回收零余额Token账户</h3>
                 <p style={{ margin: '0 0 16px 0', color: '#666' }}>
-                    自动查找并关闭钱包中所有余额为0的Token账户，回收租金
+                    自动查找并在一笔交易中关闭所有余额为0的Token账户，回收租金。主账户代付所有网络费用，无需Token账户有SOL余额。
                 </p>
+
+                {/* 主账户信息 */}
+                {walletInfo && (
+                    <div style={{
+                        backgroundColor: '#f8f9fa',
+                        border: '1px solid #dee2e6',
+                        borderRadius: '6px',
+                        padding: '12px',
+                        marginBottom: '16px'
+                    }}>
+                        <div style={{ fontSize: '14px', color: '#666', marginBottom: '4px' }}>
+                            💳 主账户（代付费用）:
+                        </div>
+                        <div style={{ fontFamily: 'monospace', fontSize: '12px', color: '#333' }}>
+                            {walletInfo.address.slice(0, 8)}...{walletInfo.address.slice(-8)}
+                        </div>
+                    </div>
+                )}
 
                 <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
                     <button
@@ -711,6 +733,9 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
                     <li><strong>重要：</strong> 会转移大部分余额，但会扣除网络费用</li>
                     <li><strong>余额不足：</strong> 如果余额太少，可能无法支付网络费用</li>
                     <li><strong>批量回收：</strong> 只回收余额为0的Token账户，不会影响有余额的账户</li>
+                    <li><strong>单笔交易：</strong> 所有关闭操作在一笔交易中完成，大幅节省网络费用</li>
+                    <li><strong>主账户代付：</strong> 连接的钱包账户代付所有网络费用，Token账户无需有SOL余额</li>
+                    <li><strong>费用优化：</strong> 只需支付一笔交易的基础费用，而不是每个Token账户单独付费</li>
                 </ul>
             </div>
         </div>
