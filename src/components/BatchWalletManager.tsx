@@ -218,7 +218,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             let totalRentRecovered = 0;
             let successCount = 0;
             let failedCount = 0;
-            const maxInstructionsPerTransaction = 20; // 每笔交易最多20个指令
+            const maxInstructionsPerTransaction = 18; // 每笔交易最多20个指令
 
             // 收集所有需要处理的指令和签名者
             const allInstructions = [];
@@ -233,23 +233,6 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     const keypair = Keypair.fromSecretKey(secretKey);
                     allSigners.set(walletData.publicKey, keypair);
                     console.log(`创建签名者: ${walletData.publicKey.slice(0, 8)}... -> ${keypair.publicKey.toString().slice(0, 8)}...`);
-
-                    // 使用getMinimumBalanceForRentExemption获取最低租金
-                    const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
-                    // 添加SOL转账指令（如果有余额）
-                    if (walletData.solBalance > minRent) {
-                        const transferAmount = walletData.solBalance - minRent;
-                        allInstructions.push({
-                            type: 'transfer',
-                            instruction: SystemProgram.transfer({
-                                fromPubkey: new PublicKey(walletData.publicKey),
-                                toPubkey: new PublicKey(walletInfo.address),
-                                lamports: transferAmount,
-                            }),
-                            solAmount: transferAmount,
-                            signer: walletData.publicKey
-                        });
-                    }
 
                     // 添加零余额Token账户关闭指令
                     for (const token of walletData.zeroBalanceTokens) {
@@ -271,7 +254,24 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
                     successCount++;
                     console.log(`准备钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
-
+                    // 使用getMinimumBalanceForRentExemption获取最低租金
+                    // const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
+                    // 直接转移全部资金，不考虑租金豁免
+                    const minRent = 0;
+                    // 添加SOL转账指令（如果有余额）
+                    if (walletData.solBalance > minRent) {
+                        const transferAmount = walletData.solBalance - minRent;
+                        allInstructions.push({
+                            type: 'transfer',
+                            instruction: SystemProgram.transfer({
+                                fromPubkey: new PublicKey(walletData.publicKey),
+                                toPubkey: new PublicKey(walletInfo.address),
+                                lamports: transferAmount,
+                            }),
+                            solAmount: transferAmount,
+                            signer: walletData.publicKey
+                        });
+                    }
                 } catch (err) {
                     failedCount++;
                     console.error(`处理钱包 ${walletData.publicKey} 失败:`, err);
@@ -291,11 +291,11 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 batches.push(allInstructions.slice(i, i + maxInstructionsPerTransaction));
             }
 
-            console.log(`将分 ${batches.length} 批处理`);
+            console.log(`将分 ${batches.length} 批处理`, batches);
 
             // 计算所需的网络费用（更实际的估算）
             const estimatedFeePerTransaction = 5000; // 每笔交易基础费用
-            const safetyBuffer = 2000; // 减少安全缓冲
+            const safetyBuffer = 0; // 减少安全缓冲
             const totalRequiredFee = (estimatedFeePerTransaction + safetyBuffer) * batches.length;
 
             console.log(`预估网络费用: ${solanaUtils.formatSOL(totalRequiredFee)} SOL (${batches.length} 笔交易)`);
@@ -376,6 +376,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     console.log(`- 添加签名者: ${signer.publicKey.toString().slice(0, 8)}...`);
                     transaction.partialSign(signer);
                 }
+                console.log('instructions', allInstructions)
                 console.log('transaction', transaction);
                 // 最后用OKX钱包签名（作为费用支付者）
                 console.log(`- 使用OKX钱包签名作为费用支付者...`);
