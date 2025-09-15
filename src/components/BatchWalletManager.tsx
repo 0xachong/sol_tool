@@ -2,9 +2,12 @@ import React, { useState } from 'react';
 import { WalletInfo } from '../types';
 import { SolanaUtils } from '../utils/solana';
 import { OKXWalletAdapter } from '../utils/okxWallet';
+import { WalletConnection } from './WalletConnection';
 
 interface BatchWalletManagerProps {
     walletInfo: WalletInfo | null;
+    onWalletConnect: (info: WalletInfo) => void;
+    onWalletDisconnect: () => void;
 }
 
 interface WalletData {
@@ -21,7 +24,7 @@ interface WalletData {
     totalRentFormatted: string;
 }
 
-export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletInfo }) => {
+export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletInfo, onWalletConnect, onWalletDisconnect }) => {
     const [privateKeys, setPrivateKeys] = useState<string>('');
     const [walletDataList, setWalletDataList] = useState<WalletData[]>([]);
     const [isScanning, setIsScanning] = useState(false);
@@ -34,7 +37,6 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
         totalSol: number;
         totalRent: number;
     } | null>(null);
-    const [skipBalanceCheck, setSkipBalanceCheck] = useState(false);
 
     const solanaUtils = React.useMemo(() => new SolanaUtils(), []);
     const walletAdapter = React.useMemo(() => new OKXWalletAdapter(), []);
@@ -303,7 +305,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             console.log(`余额检查: ${payerBalance >= totalRequiredFee ? '✅ 足够' : '❌ 不足'}`);
 
             // 检查代付钱包余额是否足够（除非用户选择跳过）
-            if (!skipBalanceCheck && payerBalance < totalRequiredFee) {
+            if (payerBalance < totalRequiredFee) {
                 const shortfall = totalRequiredFee - payerBalance;
                 setError(
                     `代付钱包余额不足！\n\n` +
@@ -444,8 +446,27 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
     return (
         <div>
-            <h2>🔑 批量钱包管理器</h2>
-            <p>批量管理多个私钥钱包，使用OKX连接的钱包作为代付地址回收所有资产</p>
+            {/* 页面头部 - 标题和钱包连接 */}
+            <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                marginBottom: '20px',
+                flexWrap: 'wrap',
+                gap: '20px'
+            }}>
+                <div style={{ flex: '1', minWidth: '300px' }}>
+                    <h2>🔑 批量钱包管理器</h2>
+                    <p>批量管理多个私钥钱包，使用OKX连接的钱包作为代付地址回收所有资产</p>
+                </div>
+                <div style={{ minWidth: '300px', maxWidth: '400px' }}>
+                    <WalletConnection
+                        onWalletConnect={onWalletConnect}
+                        onWalletDisconnect={onWalletDisconnect}
+                        walletInfo={walletInfo}
+                    />
+                </div>
+            </div>
 
             {/* 代付地址信息 */}
             {walletInfo && (
@@ -456,7 +477,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     padding: '16px',
                     marginBottom: '20px'
                 }}>
-                    <h3 style={{ margin: '0 0 8px 0', color: '#0066cc' }}>💳 代付地址</h3>
+                    <h3 style={{ margin: '0 0 8px 0', color: '#0066cc' }}>💳 代付和sol余额接收地址</h3>
                     <div style={{ fontFamily: 'monospace', fontSize: '14px', color: '#333' }}>
                         {walletInfo.address}
                     </div>
@@ -471,6 +492,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
             {/* 私钥输入 */}
             <div style={{ marginBottom: '20px' }}>
+                <h3>1. 私钥输入</h3>
                 <label htmlFor="privateKeys">Base58私钥列表（每行一个）:</label>
                 <textarea
                     id="privateKeys"
@@ -487,68 +509,47 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             </div>
 
             {/* 操作按钮 */}
-            <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
-                <button
-                    className="btn"
-                    onClick={scanAllWallets}
-                    disabled={isScanning || !privateKeys.trim()}
-                    style={{ backgroundColor: '#0066cc', color: 'white' }}
-                >
-                    {isScanning ? (
-                        <>
-                            <span className="loading"></span>
-                            扫描中...
-                        </>
-                    ) : (
-                        '🔍 扫描所有钱包'
-                    )}
-                </button>
+            <div style={{ marginBottom: '20px' }}>
+                <h3>2. 操作控制</h3>
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                    <button
+                        className="btn"
+                        onClick={scanAllWallets}
+                        disabled={isScanning || !privateKeys.trim()}
+                        style={{ backgroundColor: '#0066cc', color: 'white' }}
+                    >
+                        {isScanning ? (
+                            <>
+                                <span className="loading"></span>
+                                扫描中...
+                            </>
+                        ) : (
+                            '🔍 扫描所有钱包'
+                        )}
+                    </button>
 
-                <button
-                    className="btn btn-danger"
-                    onClick={recoverAllWallets}
-                    disabled={isRecovering || walletDataList.length === 0 || !walletInfo}
-                >
-                    {isRecovering ? (
-                        <>
-                            <span className="loading"></span>
-                            回收中...
-                        </>
-                    ) : (
-                        `💰 批量回收 (${walletDataList.length})`
-                    )}
-                </button>
+                    <button
+                        className="btn btn-danger"
+                        onClick={recoverAllWallets}
+                        disabled={isRecovering || walletDataList.length === 0 || !walletInfo}
+                    >
+                        {isRecovering ? (
+                            <>
+                                <span className="loading"></span>
+                                回收中...
+                            </>
+                        ) : (
+                            `💰 批量回收 (${walletDataList.length})`
+                        )}
+                    </button>
 
-                <button
-                    className="btn"
-                    onClick={clearData}
-                    disabled={isScanning || isRecovering}
-                >
-                    清空
-                </button>
-            </div>
-
-            {/* 高级选项 */}
-            <div style={{
-                backgroundColor: '#f8f9fa',
-                border: '1px solid #dee2e6',
-                borderRadius: '6px',
-                padding: '12px',
-                marginBottom: '20px'
-            }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input
-                        type="checkbox"
-                        id="skipBalanceCheck"
-                        checked={skipBalanceCheck}
-                        onChange={(e) => setSkipBalanceCheck(e.target.checked)}
-                    />
-                    <label htmlFor="skipBalanceCheck" style={{ fontSize: '14px', color: '#666' }}>
-                        跳过余额检查（如果确定余额足够）
-                    </label>
-                </div>
-                <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
-                    如果系统提示余额不足但您确定余额足够，可以勾选此选项跳过预检查
+                    <button
+                        className="btn"
+                        onClick={clearData}
+                        disabled={isScanning || isRecovering}
+                    >
+                        清空
+                    </button>
                 </div>
             </div>
 
@@ -562,7 +563,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     marginBottom: '20px'
                 }}>
                     <h3 style={{ margin: '0 0 16px 0' }}>
-                        钱包数据 ({walletDataList.length} 个)
+                        3. 钱包数据 ({walletDataList.length} 个)
                     </h3>
                     <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
                         {walletDataList.map((wallet, index) => (
@@ -647,7 +648,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     borderRadius: '8px',
                     marginBottom: '20px'
                 }}>
-                    <h3 style={{ margin: '0 0 12px 0' }}>回收结果</h3>
+                    <h3 style={{ margin: '0 0 12px 0' }}>4. 回收结果</h3>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '16px', fontSize: '14px' }}>
                         <div>
                             <div style={{ color: '#666', fontSize: '12px' }}>成功钱包</div>
@@ -690,12 +691,12 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             <div style={{ backgroundColor: '#fff3cd', border: '1px solid #ffeaa7', padding: '16px', borderRadius: '8px', marginTop: '20px' }}>
                 <h4>⚠️ 注意事项</h4>
                 <ul style={{ margin: '12px 0', paddingLeft: '20px' }}>
+                    <li><strong>重要提醒：</strong> 本程序只回收零余额token账户,如果有token余额或NFT请谨慎操作,避免操作不当销毁资产</li>
                     <li><strong>私钥安全：</strong> 请确保在安全环境中输入Base58格式私钥，不要在不信任的设备上使用</li>
                     <li><strong>代付机制：</strong> OKX连接的钱包将代付所有网络费用，回收的资产转入该钱包</li>
                     <li><strong>余额要求：</strong> 代付钱包必须有足够的SOL余额支付所有网络费用，系统会预先检查</li>
                     <li><strong>分批处理：</strong> 自动分批处理大量指令，避免交易过大错误，每批最多20个指令</li>
                     <li><strong>权限要求：</strong> 私钥对应的钱包必须是Token账户的所有者</li>
-                    <li><strong>SOL保留：</strong> 每个钱包会保留少量SOL（0.000005）作为网络费用缓冲</li>
                     <li><strong>不可撤销：</strong> 回收操作无法撤销，请确认后再执行</li>
                 </ul>
             </div>

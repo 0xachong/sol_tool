@@ -94,15 +94,21 @@ export const WalletConnection: React.FC<WalletConnectionProps> = ({
             )}
 
             {walletInfo ? (
-                <div>
-                    <div className="status status-success">
-                        <p>✅ 钱包已连接</p>
-                        <p>地址: {formatAddress(walletInfo.address)}</p>
+                <div className="status status-success" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
+                    <div>
+                        <p style={{ margin: '0 0 4px 0' }}>✅ 钱包已连接</p>
+                        <p style={{ margin: '0', fontSize: '12px', color: '#666' }}>地址: {formatAddress(walletInfo.address)}</p>
                     </div>
                     <button
                         className="btn btn-danger"
                         onClick={handleDisconnect}
                         disabled={isConnecting}
+                        style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            minWidth: 'auto',
+                            height: 'auto'
+                        }}
                     >
                         断开连接
                     </button>
