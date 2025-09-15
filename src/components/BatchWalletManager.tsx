@@ -34,6 +34,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
         totalSol: number;
         totalRent: number;
     } | null>(null);
+    const [skipBalanceCheck, setSkipBalanceCheck] = useState(false);
 
     const solanaUtils = React.useMemo(() => new SolanaUtils(), []);
     const walletAdapter = React.useMemo(() => new OKXWalletAdapter(), []);
@@ -224,9 +225,11 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
             for (const walletData of walletDataList) {
                 try {
+                    // 使用getMinimumBalanceForRentExemption获取最低租金
+                    const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
                     // 添加SOL转账指令（如果有余额）
-                    if (walletData.solBalance > 5000) {
-                        const transferAmount = walletData.solBalance - 5000;
+                    if (walletData.solBalance > minRent) {
+                        const transferAmount = walletData.solBalance - minRent;
                         allInstructions.push({
                             type: 'transfer',
                             instruction: SystemProgram.transfer({
@@ -279,15 +282,17 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
             console.log(`将分 ${batches.length} 批处理`);
 
-            // 计算所需的网络费用
+            // 计算所需的网络费用（更实际的估算）
             const estimatedFeePerTransaction = 5000; // 每笔交易基础费用
-            const safetyBuffer = 10000; // 安全缓冲
+            const safetyBuffer = 2000; // 减少安全缓冲
             const totalRequiredFee = (estimatedFeePerTransaction + safetyBuffer) * batches.length;
 
             console.log(`预估网络费用: ${solanaUtils.formatSOL(totalRequiredFee)} SOL (${batches.length} 笔交易)`);
+            console.log(`代付钱包余额: ${solanaUtils.formatSOL(payerBalance)} SOL`);
+            console.log(`余额检查: ${payerBalance >= totalRequiredFee ? '✅ 足够' : '❌ 不足'}`);
 
-            // 检查代付钱包余额是否足够
-            if (payerBalance < totalRequiredFee) {
+            // 检查代付钱包余额是否足够（除非用户选择跳过）
+            if (!skipBalanceCheck && payerBalance < totalRequiredFee) {
                 const shortfall = totalRequiredFee - payerBalance;
                 setError(
                     `代付钱包余额不足！\n\n` +
@@ -411,7 +416,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             </div>
 
             {/* 操作按钮 */}
-            <div style={{ display: 'flex', gap: '12px', marginBottom: '20px' }}>
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
                 <button
                     className="btn"
                     onClick={scanAllWallets}
@@ -450,6 +455,30 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 >
                     清空
                 </button>
+            </div>
+
+            {/* 高级选项 */}
+            <div style={{
+                backgroundColor: '#f8f9fa',
+                border: '1px solid #dee2e6',
+                borderRadius: '6px',
+                padding: '12px',
+                marginBottom: '20px'
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                        type="checkbox"
+                        id="skipBalanceCheck"
+                        checked={skipBalanceCheck}
+                        onChange={(e) => setSkipBalanceCheck(e.target.checked)}
+                    />
+                    <label htmlFor="skipBalanceCheck" style={{ fontSize: '14px', color: '#666' }}>
+                        跳过余额检查（如果确定余额足够）
+                    </label>
+                </div>
+                <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
+                    如果系统提示余额不足但您确定余额足够，可以勾选此选项跳过预检查
+                </div>
             </div>
 
             {/* 钱包数据列表 */}
