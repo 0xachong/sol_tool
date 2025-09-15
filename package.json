@@ -1,7 +1,7 @@
 {
     "name": "sol-tool",
     "version": "1.0.0",
-    "description": "Solana工具集 - 租金回收和账户管理",
+    "description": "Solana租金回收工具",
     "main": "index.js",
     "scripts": {
         "dev": "vite",

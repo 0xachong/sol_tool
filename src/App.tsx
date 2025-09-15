@@ -16,7 +16,7 @@ function App() {
     return (
         <div className="container">
             <div className="header">
-                <h1>🔧 Solana工具集</h1>
+                <h1>🔧 Solana租金回收工具</h1>
                 <p>批量钱包管理与租金回收工具</p>
             </div>
 

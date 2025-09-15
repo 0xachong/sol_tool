@@ -333,24 +333,6 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                                 isCurrentWallet: true // 标记为当前钱包
                             });
                         }
-
-                        // 添加SOL转账指令（如果有余额）
-                        const minRent = 0;
-                        if (walletData.solBalance > minRent) {
-                            const transferAmount = walletData.solBalance - minRent;
-                            allInstructions.push({
-                                type: 'transfer',
-                                instruction: SystemProgram.transfer({
-                                    fromPubkey: new PublicKey(walletData.publicKey),
-                                    toPubkey: new PublicKey(walletInfo.address),
-                                    lamports: transferAmount,
-                                }),
-                                solAmount: transferAmount,
-                                signer: walletData.publicKey,
-                                isCurrentWallet: true // 标记为当前钱包
-                            });
-                        }
-
                         successCount++;
                         console.log(`准备当前钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
                     } else {

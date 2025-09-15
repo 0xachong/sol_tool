@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 启动Solana工具集..."
+echo "🚀 启动Solana租金回收工具..."
 
 # 检查Node.js是否安装
 if ! command -v node &> /dev/null; then
