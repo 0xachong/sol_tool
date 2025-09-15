@@ -691,7 +691,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             <div style={{ backgroundColor: '#fff3cd', border: '1px solid #ffeaa7', padding: '16px', borderRadius: '8px', marginTop: '20px' }}>
                 <h4>⚠️ 注意事项</h4>
                 <ul style={{ margin: '12px 0', paddingLeft: '20px' }}>
-                    <li><strong>重要提醒：</strong> 本程序只回收零余额token账户,如果有token余额或NFT请谨慎操作,避免操作不当销毁资产</li>
+                    <li><strong>重要提醒：</strong> 本程序只回收零余额token账户,如果有token余额或NFT请谨慎操作,烧毁资产概不负责</li>
                     <li><strong>私钥安全：</strong> 请确保在安全环境中输入Base58格式私钥，不要在不信任的设备上使用</li>
                     <li><strong>代付机制：</strong> OKX连接的钱包将代付所有网络费用，回收的资产转入该钱包</li>
                     <li><strong>余额要求：</strong> 代付钱包必须有足够的SOL余额支付所有网络费用，系统会预先检查</li>
