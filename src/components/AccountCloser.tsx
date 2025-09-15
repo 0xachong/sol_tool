@@ -21,6 +21,11 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
         details: string;
     } | null>(null);
 
+    // 批量回收相关状态
+    const [isBatchLoading, setIsBatchLoading] = useState(false);
+    const [zeroBalanceAccounts, setZeroBalanceAccounts] = useState<any[]>([]);
+    const [batchResult, setBatchResult] = useState<{ success: number; failed: number; total: number } | null>(null);
+
     const solanaUtils = React.useMemo(() => new SolanaUtils(), []);
     const walletAdapter = React.useMemo(() => new OKXWalletAdapter(), []);
 
@@ -97,6 +102,148 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
             checkAccountStatus(accountToClose);
         }
     }, [accountToClose]);
+
+    // 批量查找零余额Token账户
+    const findZeroBalanceTokenAccounts = async () => {
+        if (!walletInfo?.address) {
+            setError('请先连接钱包');
+            return;
+        }
+
+        setIsBatchLoading(true);
+        setError(null);
+        setZeroBalanceAccounts([]);
+        setBatchResult(null);
+
+        try {
+            console.log('开始查找零余额Token账户...');
+
+            // 获取钱包的所有Token账户
+            const { PublicKey } = await import('@solana/web3.js');
+            const walletPublicKey = new PublicKey(walletInfo.address);
+
+            // 使用 getTokenAccountsByOwner 获取所有Token账户
+            const tokenAccounts = await solanaUtils['connection'].getTokenAccountsByOwner(
+                walletPublicKey,
+                {
+                    programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+                }
+            );
+
+            console.log(`找到 ${tokenAccounts.value.length} 个Token账户`);
+
+            const zeroBalanceAccounts = [];
+
+            for (const accountInfo of tokenAccounts.value) {
+                try {
+                    // 解析Token账户数据
+                    const accountData = accountInfo.account.data;
+                    const tokenAmount = accountData.readBigUInt64LE(64); // Token余额位置
+
+                    if (tokenAmount === 0n) {
+                        const accountAddress = accountInfo.pubkey.toString();
+                        const rentAmount = accountInfo.account.lamports;
+
+                        zeroBalanceAccounts.push({
+                            address: accountAddress,
+                            rentAmount: rentAmount,
+                            rentFormatted: solanaUtils.formatSOL(rentAmount)
+                        });
+                    }
+                } catch (err) {
+                    console.warn('解析Token账户失败:', err);
+                }
+            }
+
+            setZeroBalanceAccounts(zeroBalanceAccounts);
+            console.log(`找到 ${zeroBalanceAccounts.length} 个零余额Token账户`);
+
+            if (zeroBalanceAccounts.length === 0) {
+                setSuccess('未找到零余额的Token账户');
+            } else {
+                setSuccess(`找到 ${zeroBalanceAccounts.length} 个零余额Token账户，可回收租金 ${solanaUtils.formatSOL(zeroBalanceAccounts.reduce((sum, acc) => sum + acc.rentAmount, 0))} SOL`);
+            }
+
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : '查找Token账户失败';
+            setError(`查找失败: ${errorMessage}`);
+            console.error('查找Token账户失败:', err);
+        } finally {
+            setIsBatchLoading(false);
+        }
+    };
+
+    // 批量关闭零余额Token账户
+    const batchCloseZeroBalanceAccounts = async () => {
+        if (zeroBalanceAccounts.length === 0) {
+            setError('没有可关闭的Token账户');
+            return;
+        }
+
+        setIsProcessing(true);
+        setError(null);
+        setSuccess(null);
+        setBatchResult({ success: 0, failed: 0, total: zeroBalanceAccounts.length });
+
+        let successCount = 0;
+        let failedCount = 0;
+
+        try {
+            const { PublicKey, Transaction, TransactionInstruction } = await import('@solana/web3.js');
+            const { Buffer } = await import('buffer');
+
+            for (const account of zeroBalanceAccounts) {
+                try {
+                    console.log(`正在关闭Token账户: ${account.address}`);
+
+                    const transaction = new Transaction();
+
+                    // 添加关闭Token账户的指令
+                    transaction.add(
+                        new TransactionInstruction({
+                            keys: [
+                                { pubkey: new PublicKey(account.address), isSigner: false, isWritable: true },
+                                { pubkey: new PublicKey(destination), isSigner: false, isWritable: true },
+                                { pubkey: new PublicKey(walletInfo!.address), isSigner: false, isWritable: false },
+                            ],
+                            programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                            data: Buffer.from([9, 0, 0, 0]), // CloseAccount instruction
+                        })
+                    );
+
+                    // 设置交易参数
+                    const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
+                    transaction.recentBlockhash = blockhash;
+                    transaction.feePayer = new PublicKey(walletInfo!.address);
+
+                    // 签名并发送交易
+                    const signedTransaction = await walletAdapter.signTransaction(transaction);
+                    const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
+                    await solanaUtils['connection'].confirmTransaction(signature, 'confirmed');
+
+                    successCount++;
+                    console.log(`成功关闭Token账户: ${account.address}, 签名: ${signature}`);
+
+                    // 更新进度
+                    setBatchResult({ success: successCount, failed: failedCount, total: zeroBalanceAccounts.length });
+
+                } catch (err) {
+                    failedCount++;
+                    console.error(`关闭Token账户失败 ${account.address}:`, err);
+                }
+            }
+
+            const totalRent = zeroBalanceAccounts.reduce((sum, acc) => sum + acc.rentAmount, 0);
+            setSuccess(`批量关闭完成！成功: ${successCount}, 失败: ${failedCount}, 回收租金: ${solanaUtils.formatSOL(totalRent)} SOL`);
+            setBatchResult({ success: successCount, failed: failedCount, total: zeroBalanceAccounts.length });
+
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : '批量关闭失败';
+            setError(`批量关闭失败: ${errorMessage}`);
+        } finally {
+            setIsProcessing(false);
+        }
+    };
 
     const handleCloseAccount = async () => {
         if (!walletInfo) {
@@ -209,12 +356,13 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
             }
 
             // 4. 创建关闭账户交易
-            const { PublicKey, SystemProgram } = await import('@solana/web3.js');
-            const transaction = new (await import('@solana/web3.js')).Transaction();
+            const { PublicKey, SystemProgram, Transaction, TransactionInstruction } = await import('@solana/web3.js');
+            const { Buffer } = await import('buffer');
+            const transaction = new Transaction();
 
             // 计算网络费用（固定基础费用）
             const estimatedFee = 5000; // 固定基础费用 0.000005 SOL
-            const safetyBuffer = 5000; // 固定安全缓冲 0.000005 SOL
+            const safetyBuffer = 0; // 固定安全缓冲 0.000005 SOL
             const totalFee = estimatedFee + safetyBuffer; // 总计 0.00001 SOL
             const transferAmount = Math.max(0, accountInfo.lamports - totalFee);
 
@@ -238,20 +386,55 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
             }
 
 
-            // 添加转账指令 - 转移余额（扣除网络费用）
-            transaction.add(
-                SystemProgram.transfer({
-                    fromPubkey: new PublicKey(accountToClose),
-                    toPubkey: new PublicKey(destination),
-                    lamports: transferAmount, // 转移余额，扣除网络费用
-                })
-            );
+            // 检查账户类型，决定使用哪种方式回收租金
+            if (accountInfo.owner === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
+                // Token Account - 使用 Token Program 关闭指令回收租金
+                console.log('检测到 Token Account，使用 Token Program 关闭指令回收租金...');
 
-            // 5. 设置交易费用
+                transaction.add(
+                    new TransactionInstruction({
+                        keys: [
+                            { pubkey: new PublicKey(accountToClose), isSigner: false, isWritable: true },
+                            { pubkey: new PublicKey(destination), isSigner: false, isWritable: true },
+                            { pubkey: new PublicKey(accountToClose), isSigner: false, isWritable: false }, // owner
+                        ],
+                        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                        data: Buffer.from([9, 0, 0, 0]), // CloseAccount instruction
+                    })
+                );
+            } else if (accountInfo.owner === 'BPFLoader1111111111111111111111111111111111') {
+                // 程序账户 - 使用 BPFLoader 关闭指令回收租金
+                console.log('检测到程序账户，使用 BPFLoader 关闭指令回收租金...');
+
+                transaction.add(
+                    new TransactionInstruction({
+                        keys: [
+                            { pubkey: new PublicKey(accountToClose), isSigner: false, isWritable: true },
+                            { pubkey: new PublicKey(destination), isSigner: false, isWritable: true },
+                        ],
+                        programId: new PublicKey('BPFLoader1111111111111111111111111111111111'),
+                        data: Buffer.from([3, 0, 0, 0]), // close account instruction
+                    })
+                );
+            } else {
+                // 系统程序账户和普通账户 - 转移余额，系统自动回收租金
+                console.log('转移余额，系统自动回收租金...');
+
+                transaction.add(
+                    SystemProgram.transfer({
+                        fromPubkey: new PublicKey(accountToClose),
+                        toPubkey: new PublicKey(destination),
+                        lamports: transferAmount, // 转移全部余额，扣除网络费用
+                    })
+                );
+            }
+
+            console.log('总金额:', accountInfo.lamports, '准备关闭账户，转移金额:', transferAmount);
+            // 设置交易区块哈希和费用支付者
             const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
             transaction.recentBlockhash = blockhash;
             transaction.feePayer = new PublicKey(walletInfo.publicKey);
-            
+
             // 6. 签名并发送交易
             const signedTransaction = await walletAdapter.signTransaction(transaction);
             const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
@@ -264,7 +447,16 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
                 signature: signature,
             });
 
-            setSuccess(`账户关闭成功！转移了 ${solanaUtils.formatSOL(transferAmount)} SOL 到 ${destination.slice(0, 8)}...${destination.slice(-8)}（扣除网络费用 ${solanaUtils.formatSOL(totalFee)} SOL）`);
+            let accountType = '普通账户';
+            if (accountInfo.owner === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
+                accountType = 'Token Account';
+            } else if (accountInfo.owner === 'BPFLoader1111111111111111111111111111111111') {
+                accountType = '程序账户';
+            } else if (accountInfo.owner === '11111111111111111111111111111111') {
+                accountType = '系统程序账户';
+            }
+
+            setSuccess(`账户关闭成功！${accountType}的租金已回收，${solanaUtils.formatSOL(accountInfo.lamports)} SOL 已转移到 ${destination.slice(0, 8)}...${destination.slice(-8)}。`);
 
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : '关闭账户失败';
@@ -400,15 +592,125 @@ export const AccountCloser: React.FC<AccountCloserProps> = ({ walletInfo }) => {
                 </div>
             )}
 
+            {/* 批量回收零余额Token账户 */}
+            <div style={{
+                backgroundColor: '#e8f4fd',
+                border: '1px solid #b3d9ff',
+                padding: '20px',
+                borderRadius: '8px',
+                marginTop: '20px'
+            }}>
+                <h3 style={{ margin: '0 0 16px 0', color: '#0066cc' }}>🔄 批量回收零余额Token账户</h3>
+                <p style={{ margin: '0 0 16px 0', color: '#666' }}>
+                    自动查找并关闭钱包中所有余额为0的Token账户，回收租金
+                </p>
+
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
+                    <button
+                        className="btn"
+                        onClick={findZeroBalanceTokenAccounts}
+                        disabled={isBatchLoading || !walletInfo}
+                        style={{ backgroundColor: '#0066cc', color: 'white' }}
+                    >
+                        {isBatchLoading ? (
+                            <>
+                                <span className="loading"></span>
+                                查找中...
+                            </>
+                        ) : (
+                            '🔍 查找零余额Token账户'
+                        )}
+                    </button>
+
+                    <button
+                        className="btn btn-danger"
+                        onClick={batchCloseZeroBalanceAccounts}
+                        disabled={isProcessing || zeroBalanceAccounts.length === 0}
+                    >
+                        {isProcessing ? (
+                            <>
+                                <span className="loading"></span>
+                                批量关闭中...
+                            </>
+                        ) : (
+                            `🗑️ 批量关闭 (${zeroBalanceAccounts.length})`
+                        )}
+                    </button>
+                </div>
+
+                {/* 零余额账户列表 */}
+                {zeroBalanceAccounts.length > 0 && (
+                    <div style={{
+                        backgroundColor: 'white',
+                        border: '1px solid #ddd',
+                        borderRadius: '6px',
+                        padding: '12px',
+                        marginBottom: '16px'
+                    }}>
+                        <h4 style={{ margin: '0 0 12px 0', color: '#333' }}>
+                            找到的零余额Token账户 ({zeroBalanceAccounts.length} 个)
+                        </h4>
+                        <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                            {zeroBalanceAccounts.map((account, index) => (
+                                <div key={index} style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    padding: '8px 0',
+                                    borderBottom: index < zeroBalanceAccounts.length - 1 ? '1px solid #eee' : 'none'
+                                }}>
+                                    <div style={{ fontFamily: 'monospace', fontSize: '12px', color: '#666' }}>
+                                        {account.address.slice(0, 8)}...{account.address.slice(-8)}
+                                    </div>
+                                    <div style={{ color: '#28a745', fontWeight: 'bold' }}>
+                                        {account.rentFormatted} SOL
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <div style={{
+                            marginTop: '12px',
+                            padding: '8px',
+                            backgroundColor: '#f8f9fa',
+                            borderRadius: '4px',
+                            textAlign: 'center',
+                            fontWeight: 'bold',
+                            color: '#28a745'
+                        }}>
+                            总可回收租金: {solanaUtils.formatSOL(zeroBalanceAccounts.reduce((sum, acc) => sum + acc.rentAmount, 0))} SOL
+                        </div>
+                    </div>
+                )}
+
+                {/* 批量操作结果 */}
+                {batchResult && (
+                    <div style={{
+                        backgroundColor: batchResult.failed === 0 ? '#d4edda' : '#fff3cd',
+                        border: `1px solid ${batchResult.failed === 0 ? '#c3e6cb' : '#ffeaa7'}`,
+                        padding: '12px',
+                        borderRadius: '6px',
+                        marginTop: '12px'
+                    }}>
+                        <h4 style={{ margin: '0 0 8px 0' }}>批量操作结果</h4>
+                        <div style={{ display: 'flex', gap: '20px', fontSize: '14px' }}>
+                            <span style={{ color: '#28a745' }}>✅ 成功: {batchResult.success}</span>
+                            <span style={{ color: '#dc3545' }}>❌ 失败: {batchResult.failed}</span>
+                            <span style={{ color: '#666' }}>📊 总计: {batchResult.total}</span>
+                        </div>
+                    </div>
+                )}
+            </div>
+
             <div style={{ backgroundColor: '#fff3cd', border: '1px solid #ffeaa7', padding: '16px', borderRadius: '8px', marginTop: '20px' }}>
                 <h4>⚠️ 注意事项</h4>
                 <ul style={{ margin: '12px 0', paddingLeft: '20px' }}>
-                    <li>关闭账户后，账户将永久删除，无法恢复</li>
+                    <li>清空账户后，账户余额为0，系统会在下次租金周期时自动回收租金</li>
                     <li>只有账户余额超过租金要求时才能关闭</li>
                     <li>关闭账户需要支付网络费用（固定 0.00001 SOL，包含基础费用和安全缓冲）</li>
                     <li>请确保目标地址正确，转移的余额将无法撤销</li>
                     <li><strong>重要：</strong> 会转移大部分余额，但会扣除网络费用</li>
                     <li><strong>余额不足：</strong> 如果余额太少，可能无法支付网络费用</li>
+                    <li><strong>批量回收：</strong> 只回收余额为0的Token账户，不会影响有余额的账户</li>
                 </ul>
             </div>
         </div>
