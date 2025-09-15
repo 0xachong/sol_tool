@@ -28,6 +28,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
     const [privateKeys, setPrivateKeys] = useState<string>('');
     const [walletDataList, setWalletDataList] = useState<WalletData[]>([]);
     const [isScanning, setIsScanning] = useState(false);
+    const [isScanningCurrent, setIsScanningCurrent] = useState(false);
     const [isRecovering, setIsRecovering] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
@@ -141,6 +142,87 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
         }
     };
 
+    // 扫描当前钱包
+    const scanCurrentWallet = async () => {
+        if (!walletInfo?.address) {
+            setError('请先连接OKX钱包');
+            return;
+        }
+
+        setIsScanningCurrent(true);
+        setError(null);
+        setSuccess(null);
+
+        try {
+            const { PublicKey } = await import('@solana/web3.js');
+            const walletPublicKey = new PublicKey(walletInfo.address);
+
+            console.log(`开始扫描当前钱包: ${walletInfo.address}`);
+
+            // 获取SOL余额
+            const accountInfo = await solanaUtils['connection'].getAccountInfo(walletPublicKey);
+            const solBalance = accountInfo ? accountInfo.lamports : 0;
+            const solFormatted = solanaUtils.formatSOL(solBalance);
+
+            // 获取零余额Token账户
+            const zeroBalanceTokens = [];
+            try {
+                const tokenAccounts = await solanaUtils['connection'].getTokenAccountsByOwner(
+                    walletPublicKey,
+                    {
+                        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+                    }
+                );
+
+                for (const accountInfo of tokenAccounts.value) {
+                    try {
+                        const accountData = accountInfo.account.data;
+                        const tokenAmount = accountData.readBigUInt64LE(64);
+
+                        if (tokenAmount === 0n) {
+                            zeroBalanceTokens.push({
+                                address: accountInfo.pubkey.toString(),
+                                rentAmount: accountInfo.account.lamports,
+                                rentFormatted: solanaUtils.formatSOL(accountInfo.account.lamports)
+                            });
+                        }
+                    } catch (err) {
+                        console.warn('解析Token账户失败:', err);
+                    }
+                }
+            } catch (err) {
+                console.warn('获取Token账户失败:', err);
+            }
+
+            const totalRent = zeroBalanceTokens.reduce((sum, token) => sum + token.rentAmount, 0);
+
+            const currentWalletData: WalletData = {
+                privateKey: 'current-wallet', // 标记为当前钱包
+                publicKey: walletInfo.address,
+                solBalance,
+                solFormatted,
+                zeroBalanceTokens,
+                totalRent,
+                totalRentFormatted: solanaUtils.formatSOL(totalRent)
+            };
+
+            // 将当前钱包数据添加到列表中
+            setWalletDataList(prev => {
+                // 先移除之前的当前钱包数据（如果有）
+                const filtered = prev.filter(wallet => wallet.privateKey !== 'current-wallet');
+                return [...filtered, currentWalletData];
+            });
+
+            setSuccess(`当前钱包扫描完成！SOL余额: ${solFormatted}，可回收租金: ${solanaUtils.formatSOL(totalRent)}，零余额Token账户: ${zeroBalanceTokens.length} 个`);
+
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : '扫描失败';
+            setError(`扫描当前钱包失败: ${errorMessage}`);
+        } finally {
+            setIsScanningCurrent(false);
+        }
+    };
+
     // 扫描所有钱包
     const scanAllWallets = async () => {
         if (!privateKeys.trim()) {
@@ -228,51 +310,96 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
 
             for (const walletData of walletDataList) {
                 try {
-                    // 为每个钱包创建签名者
-                    const { Keypair } = await import('@solana/web3.js');
-                    const bs58 = await import('bs58');
-                    const secretKey = bs58.default.decode(walletData.privateKey);
-                    const keypair = Keypair.fromSecretKey(secretKey);
-                    allSigners.set(walletData.publicKey, keypair);
-                    console.log(`创建签名者: ${walletData.publicKey.slice(0, 8)}... -> ${keypair.publicKey.toString().slice(0, 8)}...`);
+                    // 检查是否是当前钱包（没有私钥）
+                    if (walletData.privateKey === 'current-wallet') {
+                        // 当前钱包使用OKX钱包签名
+                        console.log(`处理当前钱包: ${walletData.publicKey.slice(0, 8)}...`);
 
-                    // 添加零余额Token账户关闭指令
-                    for (const token of walletData.zeroBalanceTokens) {
-                        allInstructions.push({
-                            type: 'closeToken',
-                            instruction: new TransactionInstruction({
-                                keys: [
-                                    { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true }, // token账户
-                                    { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true }, // 代付地址（接收rent）
-                                    { pubkey: new PublicKey(walletData.publicKey), isSigner: true, isWritable: false }, // 该token账户的owner，必须isSigner: true
-                                ],
-                                programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-                                data: Buffer.from([9, 0, 0, 0]),
-                            }),
-                            rentAmount: token.rentAmount,
-                            signer: walletData.publicKey
-                        });
-                    }
+                        // 添加零余额Token账户关闭指令
+                        for (const token of walletData.zeroBalanceTokens) {
+                            allInstructions.push({
+                                type: 'closeToken',
+                                instruction: new TransactionInstruction({
+                                    keys: [
+                                        { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true }, // token账户
+                                        { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true }, // 代付地址（接收rent）
+                                        { pubkey: new PublicKey(walletData.publicKey), isSigner: true, isWritable: false }, // 该token账户的owner，必须isSigner: true
+                                    ],
+                                    programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                                    data: Buffer.from([9, 0, 0, 0]),
+                                }),
+                                rentAmount: token.rentAmount,
+                                signer: walletData.publicKey,
+                                isCurrentWallet: true // 标记为当前钱包
+                            });
+                        }
 
-                    successCount++;
-                    console.log(`准备钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
-                    // 使用getMinimumBalanceForRentExemption获取最低租金
-                    // const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
-                    // 直接转移全部资金，不考虑租金豁免
-                    const minRent = 0;
-                    // 添加SOL转账指令（如果有余额）
-                    if (walletData.solBalance > minRent) {
-                        const transferAmount = walletData.solBalance - minRent;
-                        allInstructions.push({
-                            type: 'transfer',
-                            instruction: SystemProgram.transfer({
-                                fromPubkey: new PublicKey(walletData.publicKey),
-                                toPubkey: new PublicKey(walletInfo.address),
-                                lamports: transferAmount,
-                            }),
-                            solAmount: transferAmount,
-                            signer: walletData.publicKey
-                        });
+                        // 添加SOL转账指令（如果有余额）
+                        const minRent = 0;
+                        if (walletData.solBalance > minRent) {
+                            const transferAmount = walletData.solBalance - minRent;
+                            allInstructions.push({
+                                type: 'transfer',
+                                instruction: SystemProgram.transfer({
+                                    fromPubkey: new PublicKey(walletData.publicKey),
+                                    toPubkey: new PublicKey(walletInfo.address),
+                                    lamports: transferAmount,
+                                }),
+                                solAmount: transferAmount,
+                                signer: walletData.publicKey,
+                                isCurrentWallet: true // 标记为当前钱包
+                            });
+                        }
+
+                        successCount++;
+                        console.log(`准备当前钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
+                    } else {
+                        // 普通钱包使用私钥签名
+                        const { Keypair } = await import('@solana/web3.js');
+                        const bs58 = await import('bs58');
+                        const secretKey = bs58.default.decode(walletData.privateKey);
+                        const keypair = Keypair.fromSecretKey(secretKey);
+                        allSigners.set(walletData.publicKey, keypair);
+                        console.log(`创建签名者: ${walletData.publicKey.slice(0, 8)}... -> ${keypair.publicKey.toString().slice(0, 8)}...`);
+
+                        // 添加零余额Token账户关闭指令
+                        for (const token of walletData.zeroBalanceTokens) {
+                            allInstructions.push({
+                                type: 'closeToken',
+                                instruction: new TransactionInstruction({
+                                    keys: [
+                                        { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true }, // token账户
+                                        { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true }, // 代付地址（接收rent）
+                                        { pubkey: new PublicKey(walletData.publicKey), isSigner: true, isWritable: false }, // 该token账户的owner，必须isSigner: true
+                                    ],
+                                    programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                                    data: Buffer.from([9, 0, 0, 0]),
+                                }),
+                                rentAmount: token.rentAmount,
+                                signer: walletData.publicKey
+                            });
+                        }
+
+                        successCount++;
+                        console.log(`准备钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
+                        // 使用getMinimumBalanceForRentExemption获取最低租金
+                        // const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
+                        // 直接转移全部资金，不考虑租金豁免
+                        const minRent = 0;
+                        // 添加SOL转账指令（如果有余额）
+                        if (walletData.solBalance > minRent) {
+                            const transferAmount = walletData.solBalance - minRent;
+                            allInstructions.push({
+                                type: 'transfer',
+                                instruction: SystemProgram.transfer({
+                                    fromPubkey: new PublicKey(walletData.publicKey),
+                                    toPubkey: new PublicKey(walletInfo.address),
+                                    lamports: transferAmount,
+                                }),
+                                solAmount: transferAmount,
+                                signer: walletData.publicKey
+                            });
+                        }
                     }
                 } catch (err) {
                     failedCount++;
@@ -332,8 +459,8 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 for (const instructionData of batch) {
                     transaction.add(instructionData.instruction);
 
-                    // 收集需要的签名者
-                    if (instructionData.signer) {
+                    // 收集需要的签名者（当前钱包不需要添加到requiredSigners，因为会通过OKX钱包签名）
+                    if (instructionData.signer && !instructionData.isCurrentWallet) {
                         requiredSigners.add(instructionData.signer);
                     }
 
@@ -380,9 +507,20 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 }
                 console.log('instructions', allInstructions)
                 console.log('transaction', transaction);
-                // 最后用OKX钱包签名（作为费用支付者）
-                console.log(`- 使用OKX钱包签名作为费用支付者...`);
-                const signedTransaction = await walletAdapter.signTransaction(transaction);
+
+                // 检查当前批次是否包含当前钱包的指令
+                const hasCurrentWalletInstructions = batch.some(instruction => instruction.isCurrentWallet);
+
+                let signedTransaction;
+                if (hasCurrentWalletInstructions) {
+                    console.log(`- 当前批次包含当前钱包指令，需要OKX钱包签名...`);
+                    // 对于包含当前钱包指令的交易，需要OKX钱包签名所有指令
+                    signedTransaction = await walletAdapter.signTransaction(transaction);
+                } else {
+                    // 最后用OKX钱包签名（作为费用支付者）
+                    console.log(`- 使用OKX钱包签名作为费用支付者...`);
+                    signedTransaction = await walletAdapter.signTransaction(transaction);
+                }
 
                 // 验证签名
                 console.log(`- 交易签名数量: ${signedTransaction.signatures.length}`);
@@ -514,6 +652,22 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
                     <button
                         className="btn"
+                        onClick={scanCurrentWallet}
+                        disabled={isScanningCurrent || !walletInfo}
+                        style={{ backgroundColor: '#28a745', color: 'white' }}
+                    >
+                        {isScanningCurrent ? (
+                            <>
+                                <span className="loading"></span>
+                                扫描中...
+                            </>
+                        ) : (
+                            '🔍 扫描当前钱包'
+                        )}
+                    </button>
+
+                    <button
+                        className="btn"
                         onClick={scanAllWallets}
                         disabled={isScanning || !privateKeys.trim()}
                         style={{ backgroundColor: '#0066cc', color: 'white' }}
@@ -579,7 +733,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                                         {wallet.publicKey.slice(0, 8)}...{wallet.publicKey.slice(-8)}
                                     </div>
                                     <div style={{ fontSize: '12px', color: '#666' }}>
-                                        钱包 #{index + 1}
+                                        {wallet.privateKey === 'current-wallet' ? '当前钱包' : `钱包 #${index + 1}`}
                                     </div>
                                 </div>
 
