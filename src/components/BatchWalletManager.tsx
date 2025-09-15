@@ -59,12 +59,23 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             const { Keypair } = await import('@solana/web3.js');
             const bs58 = await import('bs58');
 
+            // 验证私钥长度（Base58编码的Solana私钥通常是88个字符）
+            if (privateKey.length < 80 || privateKey.length > 100) {
+                throw new Error(`私钥长度不正确，应该是88个字符左右，当前: ${privateKey.length}`);
+            }
+
             // 尝试base58解码
             const secretKey = bs58.default.decode(privateKey);
+
+            // 验证解码后的长度（应该是64字节）
+            if (secretKey.length !== 64) {
+                throw new Error(`解码后私钥长度不正确，应该是64字节，当前: ${secretKey.length}`);
+            }
+
             const keypair = Keypair.fromSecretKey(secretKey);
             return keypair.publicKey.toString();
         } catch (err) {
-            throw new Error(`Base58私钥格式错误: ${privateKey.slice(0, 8)}...`);
+            throw new Error(`Base58私钥格式错误: ${privateKey.slice(0, 8)}... (${err instanceof Error ? err.message : '未知错误'})`);
         }
     };
 
@@ -173,7 +184,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
         }
     };
 
-    // 批量回收所有钱包
+    // 批量回收所有钱包（分批处理避免交易过大）
     const recoverAllWallets = async () => {
         if (!walletInfo?.address) {
             setError('请先连接OKX钱包作为代付地址');
@@ -197,48 +208,55 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             console.log(`开始批量回收 ${walletDataList.length} 个钱包...`);
             console.log(`代付地址: ${walletInfo.address}`);
 
-            // 创建单笔交易
-            const transaction = new Transaction();
+            // 检查代付钱包余额
+            const payerAccount = await solanaUtils['connection'].getAccountInfo(new PublicKey(walletInfo.address));
+            const payerBalance = payerAccount ? payerAccount.lamports : 0;
+            console.log(`代付钱包当前余额: ${solanaUtils.formatSOL(payerBalance)} SOL`);
 
             let totalSolRecovered = 0;
             let totalRentRecovered = 0;
             let successCount = 0;
             let failedCount = 0;
+            const maxInstructionsPerTransaction = 20; // 每笔交易最多20个指令
 
-            // 为每个钱包添加回收指令
+            // 收集所有需要处理的指令
+            const allInstructions = [];
+
             for (const walletData of walletDataList) {
                 try {
                     // 添加SOL转账指令（如果有余额）
-                    if (walletData.solBalance > 5000) { // 保留少量SOL作为网络费用
+                    if (walletData.solBalance > 5000) {
                         const transferAmount = walletData.solBalance - 5000;
-                        transaction.add(
-                            SystemProgram.transfer({
+                        allInstructions.push({
+                            type: 'transfer',
+                            instruction: SystemProgram.transfer({
                                 fromPubkey: new PublicKey(walletData.publicKey),
                                 toPubkey: new PublicKey(walletInfo.address),
                                 lamports: transferAmount,
-                            })
-                        );
-                        totalSolRecovered += transferAmount;
+                            }),
+                            solAmount: transferAmount
+                        });
                     }
 
                     // 添加零余额Token账户关闭指令
                     for (const token of walletData.zeroBalanceTokens) {
-                        transaction.add(
-                            new TransactionInstruction({
+                        allInstructions.push({
+                            type: 'closeToken',
+                            instruction: new TransactionInstruction({
                                 keys: [
                                     { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true },
                                     { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true },
                                     { pubkey: new PublicKey(walletData.publicKey), isSigner: false, isWritable: false },
                                 ],
                                 programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-                                data: Buffer.from([9, 0, 0, 0]), // CloseAccount instruction
-                            })
-                        );
-                        totalRentRecovered += token.rentAmount;
+                                data: Buffer.from([9, 0, 0, 0]),
+                            }),
+                            rentAmount: token.rentAmount
+                        });
                     }
 
                     successCount++;
-                    console.log(`添加钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
+                    console.log(`准备钱包 ${walletData.publicKey.slice(0, 8)}... 的回收指令`);
 
                 } catch (err) {
                     failedCount++;
@@ -246,27 +264,79 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 }
             }
 
-            if (transaction.instructions.length === 0) {
+            if (allInstructions.length === 0) {
                 setError('没有可回收的资产');
                 return;
             }
 
-            console.log(`交易包含 ${transaction.instructions.length} 个指令`);
+            console.log(`总共需要处理 ${allInstructions.length} 个指令，将分批处理`);
 
-            // 设置交易参数
-            const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
-            transaction.recentBlockhash = blockhash;
-            transaction.feePayer = new PublicKey(walletInfo.address);
+            // 分批处理指令
+            const batches = [];
+            for (let i = 0; i < allInstructions.length; i += maxInstructionsPerTransaction) {
+                batches.push(allInstructions.slice(i, i + maxInstructionsPerTransaction));
+            }
 
-            // 签名并发送交易
-            console.log('正在签名交易...');
-            const signedTransaction = await walletAdapter.signTransaction(transaction);
+            console.log(`将分 ${batches.length} 批处理`);
 
-            console.log('正在发送交易...');
-            const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
+            // 计算所需的网络费用
+            const estimatedFeePerTransaction = 5000; // 每笔交易基础费用
+            const safetyBuffer = 10000; // 安全缓冲
+            const totalRequiredFee = (estimatedFeePerTransaction + safetyBuffer) * batches.length;
 
-            console.log('等待交易确认...');
-            await solanaUtils['connection'].confirmTransaction(signature, 'confirmed');
+            console.log(`预估网络费用: ${solanaUtils.formatSOL(totalRequiredFee)} SOL (${batches.length} 笔交易)`);
+
+            // 检查代付钱包余额是否足够
+            if (payerBalance < totalRequiredFee) {
+                const shortfall = totalRequiredFee - payerBalance;
+                setError(
+                    `代付钱包余额不足！\n\n` +
+                    `📊 费用分析：\n` +
+                    `• 代付钱包余额: ${solanaUtils.formatSOL(payerBalance)} SOL\n` +
+                    `• 预估网络费用: ${solanaUtils.formatSOL(totalRequiredFee)} SOL\n` +
+                    `• 交易批次数: ${batches.length} 批\n` +
+                    `• 每批费用: ${solanaUtils.formatSOL(estimatedFeePerTransaction + safetyBuffer)} SOL\n` +
+                    `• 不足金额: ${solanaUtils.formatSOL(shortfall)} SOL\n\n` +
+                    `💡 建议：向代付钱包充值至少 ${solanaUtils.formatSOL(shortfall)} SOL 后重试`
+                );
+                return;
+            }
+
+            // 处理每一批
+            for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+                const batch = batches[batchIndex];
+                console.log(`处理第 ${batchIndex + 1}/${batches.length} 批，包含 ${batch.length} 个指令`);
+
+                const transaction = new Transaction();
+
+                // 添加当前批次的指令
+                for (const instructionData of batch) {
+                    transaction.add(instructionData.instruction);
+
+                    if (instructionData.type === 'transfer' && instructionData.solAmount) {
+                        totalSolRecovered += instructionData.solAmount;
+                    } else if (instructionData.type === 'closeToken' && instructionData.rentAmount) {
+                        totalRentRecovered += instructionData.rentAmount;
+                    }
+                }
+
+                // 设置交易参数
+                const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
+                transaction.recentBlockhash = blockhash;
+                transaction.feePayer = new PublicKey(walletInfo.address);
+                console.log('transaction', transaction);
+                // 签名并发送交易
+                console.log(`正在签名第 ${batchIndex + 1} 批交易...`);
+                const signedTransaction = await walletAdapter.signTransaction(transaction);
+
+                console.log(`正在发送第 ${batchIndex + 1} 批交易...`);
+                const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
+
+                console.log(`等待第 ${batchIndex + 1} 批交易确认...`);
+                await solanaUtils['connection'].confirmTransaction(signature, 'confirmed');
+
+                console.log(`第 ${batchIndex + 1} 批交易完成，签名: ${signature}`);
+            }
 
             setRecoveryResult({
                 success: successCount,
@@ -275,9 +345,9 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 totalRent: totalRentRecovered
             });
 
-            setSuccess(`批量回收成功！回收SOL: ${solanaUtils.formatSOL(totalSolRecovered)}，回收租金: ${solanaUtils.formatSOL(totalRentRecovered)}，签名: ${signature}`);
+            setSuccess(`批量回收成功！分 ${batches.length} 批处理，回收SOL: ${solanaUtils.formatSOL(totalSolRecovered)}，回收租金: ${solanaUtils.formatSOL(totalRentRecovered)}`);
 
-            console.log(`批量回收完成！签名: ${signature}`);
+            console.log(`批量回收完成！总共处理了 ${batches.length} 批交易`);
 
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : '批量回收失败';
@@ -315,7 +385,10 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                         {walletInfo.address}
                     </div>
                     <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                        所有回收的SOL和租金将转入此地址
+                        所有回收的SOL和租金将转入此地址，此地址将代付所有网络费用
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#ff6b35', marginTop: '8px', fontWeight: 'bold' }}>
+                        ⚠️ 请确保代付地址有足够的SOL余额支付网络费用
                     </div>
                 </div>
             )}
@@ -333,7 +406,7 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                     style={{ width: '100%', minHeight: '120px' }}
                 />
                 <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                    支持格式：Base58私钥、[Base58私钥,公钥]格式等
+                    支持格式：Base58私钥（88字符）、[Base58私钥,公钥]格式等
                 </div>
             </div>
 
@@ -519,7 +592,8 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 <ul style={{ margin: '12px 0', paddingLeft: '20px' }}>
                     <li><strong>私钥安全：</strong> 请确保在安全环境中输入Base58格式私钥，不要在不信任的设备上使用</li>
                     <li><strong>代付机制：</strong> OKX连接的钱包将代付所有网络费用，回收的资产转入该钱包</li>
-                    <li><strong>批量操作：</strong> 所有回收操作在一笔交易中完成，大幅节省网络费用</li>
+                    <li><strong>余额要求：</strong> 代付钱包必须有足够的SOL余额支付所有网络费用，系统会预先检查</li>
+                    <li><strong>分批处理：</strong> 自动分批处理大量指令，避免交易过大错误，每批最多20个指令</li>
                     <li><strong>权限要求：</strong> 私钥对应的钱包必须是Token账户的所有者</li>
                     <li><strong>SOL保留：</strong> 每个钱包会保留少量SOL（0.000005）作为网络费用缓冲</li>
                     <li><strong>不可撤销：</strong> 回收操作无法撤销，请确认后再执行</li>
