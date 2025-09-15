@@ -220,11 +220,20 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
             let failedCount = 0;
             const maxInstructionsPerTransaction = 20; // 每笔交易最多20个指令
 
-            // 收集所有需要处理的指令
+            // 收集所有需要处理的指令和签名者
             const allInstructions = [];
+            const allSigners = new Map(); // 存储私钥对应的签名者
 
             for (const walletData of walletDataList) {
                 try {
+                    // 为每个钱包创建签名者
+                    const { Keypair } = await import('@solana/web3.js');
+                    const bs58 = await import('bs58');
+                    const secretKey = bs58.default.decode(walletData.privateKey);
+                    const keypair = Keypair.fromSecretKey(secretKey);
+                    allSigners.set(walletData.publicKey, keypair);
+                    console.log(`创建签名者: ${walletData.publicKey.slice(0, 8)}... -> ${keypair.publicKey.toString().slice(0, 8)}...`);
+
                     // 使用getMinimumBalanceForRentExemption获取最低租金
                     const minRent = await solanaUtils['connection'].getMinimumBalanceForRentExemption(0);
                     // 添加SOL转账指令（如果有余额）
@@ -237,7 +246,8 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                                 toPubkey: new PublicKey(walletInfo.address),
                                 lamports: transferAmount,
                             }),
-                            solAmount: transferAmount
+                            solAmount: transferAmount,
+                            signer: walletData.publicKey
                         });
                     }
 
@@ -247,14 +257,15 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                             type: 'closeToken',
                             instruction: new TransactionInstruction({
                                 keys: [
-                                    { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true },
-                                    { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true },
-                                    { pubkey: new PublicKey(walletData.publicKey), isSigner: false, isWritable: false },
+                                    { pubkey: new PublicKey(token.address), isSigner: false, isWritable: true }, // token账户
+                                    { pubkey: new PublicKey(walletInfo.address), isSigner: false, isWritable: true }, // 代付地址（接收rent）
+                                    { pubkey: new PublicKey(walletData.publicKey), isSigner: true, isWritable: false }, // 该token账户的owner，必须isSigner: true
                                 ],
                                 programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
                                 data: Buffer.from([9, 0, 0, 0]),
                             }),
-                            rentAmount: token.rentAmount
+                            rentAmount: token.rentAmount,
+                            signer: walletData.publicKey
                         });
                     }
 
@@ -313,10 +324,16 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 console.log(`处理第 ${batchIndex + 1}/${batches.length} 批，包含 ${batch.length} 个指令`);
 
                 const transaction = new Transaction();
+                const requiredSigners = new Set(); // 收集当前批次需要的签名者
 
                 // 添加当前批次的指令
                 for (const instructionData of batch) {
                     transaction.add(instructionData.instruction);
+
+                    // 收集需要的签名者
+                    if (instructionData.signer) {
+                        requiredSigners.add(instructionData.signer);
+                    }
 
                     if (instructionData.type === 'transfer' && instructionData.solAmount) {
                         totalSolRecovered += instructionData.solAmount;
@@ -329,10 +346,44 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
                 const { blockhash } = await solanaUtils['connection'].getLatestBlockhash();
                 transaction.recentBlockhash = blockhash;
                 transaction.feePayer = new PublicKey(walletInfo.address);
-                console.log('transaction', transaction);
+
+                // 调试交易信息
+                console.log(`第 ${batchIndex + 1} 批交易详情:`);
+                console.log(`- 指令数量: ${transaction.instructions.length}`);
+                console.log(`- 需要签名者: ${Array.from(requiredSigners).map(pk => (pk as string).slice(0, 8) + '...').join(', ')}`);
+                // console.log(`- 交易大小: ${transaction.serialize().length} 字节`);
+                console.log(`- 费用支付者: ${walletInfo.address}`);
+                console.log(`- 区块哈希: ${blockhash}`);
+
                 // 签名并发送交易
                 console.log(`正在签名第 ${batchIndex + 1} 批交易...`);
+
+                // 添加所有需要的签名者
+                const signers = Array.from(requiredSigners).map(pubkey => allSigners.get(pubkey)).filter(Boolean);
+                console.log(`- 签名者数量: ${signers.length}`);
+                console.log(`- 需要的签名者: ${Array.from(requiredSigners).join(', ')}`);
+                console.log(`- 找到的签名者: ${signers.map(s => s.publicKey.toString()).join(', ')}`);
+
+                // 检查是否所有需要的签名者都找到了
+                const missingSigners = Array.from(requiredSigners).filter(pubkey => !allSigners.has(pubkey));
+                if (missingSigners.length > 0) {
+                    console.error(`❌ 缺少签名者: ${missingSigners.join(', ')}`);
+                    throw new Error(`缺少签名者: ${missingSigners.join(', ')}`);
+                }
+
+                // 先添加所有需要的签名者到交易中
+                for (const signer of signers) {
+                    console.log(`- 添加签名者: ${signer.publicKey.toString().slice(0, 8)}...`);
+                    transaction.partialSign(signer);
+                }
+                console.log('transaction', transaction);
+                // 最后用OKX钱包签名（作为费用支付者）
+                console.log(`- 使用OKX钱包签名作为费用支付者...`);
                 const signedTransaction = await walletAdapter.signTransaction(transaction);
+
+                // 验证签名
+                console.log(`- 交易签名数量: ${signedTransaction.signatures.length}`);
+                console.log(`- 签名者公钥: ${signedTransaction.signatures.map((sig: any) => sig.publicKey.toString()).join(', ')}`);
 
                 console.log(`正在发送第 ${batchIndex + 1} 批交易...`);
                 const signature = await solanaUtils['connection'].sendRawTransaction(signedTransaction.serialize());
@@ -357,7 +408,26 @@ export const BatchWalletManager: React.FC<BatchWalletManagerProps> = ({ walletIn
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : '批量回收失败';
             setError(`批量回收失败: ${errorMessage}`);
-            console.error('批量回收失败:', err);
+            if (err instanceof Error && err.stack) {
+                // 打印详细的错误堆栈信息，并输出出错的具体行号
+                if (err.stack) {
+                    const stackLines = err.stack.split('\n');
+                    stackLines.forEach((line, idx) => {
+                        // 尝试匹配行号信息
+                        const match = line.match(/:(\d+):\d+\)?$/);
+                        if (match) {
+                            const lineNumber = match[1];
+                            console.error(`堆栈[${idx}]: ${line.trim()} (出错行号: ${lineNumber})`);
+                        } else {
+                            console.error(`堆栈[${idx}]: ${line.trim()}`);
+                        }
+                    });
+                } else {
+                    console.error('批量回收失败，未获取到堆栈信息');
+                }
+            } else {
+                console.error('批量回收失败:', err);
+            }
         } finally {
             setIsRecovering(false);
         }
